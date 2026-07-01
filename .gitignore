@@ -36,6 +36,7 @@ data/
 *.hdf5
 *.npy
 *.npz
+*.csv
 
 # --- Logs / outputs ---
 logs/
