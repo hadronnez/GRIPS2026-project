@@ -1,35 +1,3 @@
-"""
-models.py
-=========
-Two-stage energy-price forecasting network.
-
-STAGE 1  (per energy font e in {solar, wind, hydro, non_marketized, tie_line})
-    meteo_e(t)  --[CNN/U-Net]-->  EfficiencyMap_e(t)   in [0,1], shape (H,W)
-                                        x
-                CapacityMap_e (learnable, time-invariant), shape (H,W)
-                                        =
-                        ProductionMap_e(t), shape (H,W)
-                                        |  sum over (H,W)
-                                        v
-                        AggregatedProduction_e(t)   shape (T,)
-
-    "solar", "wind", "hydro" use SpatialEnergyBranch (CapacityMap is a 2-D
-    field learned via a small U-Net-fed factorization).
-
-    "non_marketized" and "tie_line" have no meaningful spatial meteo driver,
-    so NonSpatialEnergyBranch reuses the same capacity x efficiency
-    factorization but with a scalar capacity and an MLP efficiency.
-
-STAGE 2
-    All five AggregatedProduction_e(t) timeseries are concatenated with
-    boundary conditions (demand forecast, fuel price, calendar features...)
-    and fed to a temporal model (TCN by default, MLP baseline available)
-    that outputs the predicted price(t).
-
-The whole thing is one differentiable graph: gradients from the price loss
-flow back through Stage 2 into the Stage-1 capacity maps and efficiency
-networks, on top of the direct Stage-1 production loss.
-"""
 from __future__ import annotations
 import torch
 import torch.nn as nn
@@ -41,7 +9,7 @@ ALL_ENERGY_TYPES = SPATIAL_TYPES + NONSPATIAL_TYPES
 
 
 # ---------------------------------------------------------------------------
-# Stage 1 - spatial branch
+# Stage 1 - spatial model 
 # ---------------------------------------------------------------------------
 
 class ConvBlock(nn.Module):
@@ -121,7 +89,7 @@ class CapacityMap(nn.Module):
         return dh + dw
 
 
-class SpatialEnergyBranch(nn.Module):
+class SpatialEnergyModel(nn.Module):
     """CapacityMap x EfficiencyMap(t) -> production map(t) -> aggregated
     production(t), for one spatially-resolved energy font.
     """
@@ -153,10 +121,10 @@ class SpatialEnergyBranch(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Stage 1 - non-spatial branch (non_marketized, tie_line interchange)
+# Stage 1 - non-spatial model (non_marketized, tie_line interchange)
 # ---------------------------------------------------------------------------
 
-class NonSpatialEnergyBranch(nn.Module):
+class NonSpatialEnergyModel(nn.Module):
     """Same capacity x efficiency idea, but for energy fonts without a
     meaningful (lon, lat) meteo driver: capacity is a single learnable
     scalar and efficiency(t) comes from an MLP over exogenous features
@@ -186,7 +154,7 @@ class NonSpatialEnergyBranch(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 - price heads
+# Stage 2 - price model
 # ---------------------------------------------------------------------------
 
 class CausalConv1dBlock(nn.Module):
@@ -210,7 +178,7 @@ class CausalConv1dBlock(nn.Module):
         return out + x
 
 
-class TCNPriceHead(nn.Module):
+class TCNPriceModel(nn.Module):
     """Temporal Convolutional Network: stacked dilated causal convolutions
     give it a growing receptive field over past timesteps, so price(t) can
     depend on production/demand history, not just the instantaneous values.
@@ -237,10 +205,10 @@ class TCNPriceHead(nn.Module):
         return self.output_proj(x).squeeze(1)  # (B,T)
 
 
-
 # ---------------------------------------------------------------------------
 # Full NN
 # ---------------------------------------------------------------------------
+
 
 class EnergyPriceModel(nn.Module):
     def __init__(self, spatial_in_channels: dict[str, int], H: int, W: int,
@@ -249,17 +217,17 @@ class EnergyPriceModel(nn.Module):
                  area_weights: torch.Tensor | None = None):
         super().__init__()
         self.spatial_branches = nn.ModuleDict({
-            name: SpatialEnergyBranch(spatial_in_channels[name], H, W,
+            name: SpatialEnergyModel(spatial_in_channels[name], H, W,
                                        area_weights=area_weights)
             for name in spatial_in_channels
         })
         self.nonspatial_branches = nn.ModuleDict({
-            name: NonSpatialEnergyBranch(nonspatial_in_features[name])
+            name: NonSpatialEnergyModel(nonspatial_in_features[name])
             for name in nonspatial_in_features
         })
         n_energy = len(spatial_in_channels) + len(nonspatial_in_features)
         stage2_in = n_energy + n_boundary_features
-        self.price_head = TCNPriceHead(stage2_in)
+        self.price_head = TCNPriceModel(stage2_in)
         
 
     def forward(self, meteo: dict[str, torch.Tensor],
