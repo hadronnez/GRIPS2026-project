@@ -1,6 +1,6 @@
 {
-  "input_path": "output/raw_nwp_standardized.nc",
-  "output_dir": "output/nwp_normalized",
+  "input_path": "output\\raw_datasets\\raw_nwp_dataset.nc",
+  "output_dir": "output\\clean_datasets\\clean_nwp_dataset.nc",
   "channel_order": [
     "ghi",
     "sp",
@@ -37,7 +37,6 @@
       "start_time": "2025-01-02",
       "end_time": "2025-10-31T23:00:00",
       "time_steps": 7272,
-      "output_path": "output/nwp_normalized/nwp_normalized_train.nc",
       "channels": {
         "ghi": {
           "method": "global_minmax_only",
@@ -87,7 +86,6 @@
       "start_time": "2025-11-01",
       "end_time": "2025-12-31T23:00:00",
       "time_steps": 1464,
-      "output_path": "output/nwp_normalized/nwp_normalized_test.nc",
       "channels": {
         "ghi": {
           "method": "global_minmax_only",
@@ -133,5 +131,6 @@
         }
       }
     }
-  }
+  },
+  "merged_output_path": "output\\clean_datasets\\clean_nwp_dataset.nc\\nwp_normalized.nc"
 }

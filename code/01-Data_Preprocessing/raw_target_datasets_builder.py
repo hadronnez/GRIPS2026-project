@@ -21,8 +21,8 @@ from pathlib import Path
 import pandas as pd
 
 
-DEFAULT_INPUT_PATH = Path("raw_data/targets/preduction.csv")
-DEFAULT_OUTPUT_DIR = Path("output/raw_boundary_standardized")
+DEFAULT_INPUT_PATH = Path("raw_data/targets/production.csv")
+DEFAULT_OUTPUT_DIR = Path("output/raw_targets")
 DEFAULT_TIME_COLUMN = "times"
 DEFAULT_START_TIME = "2025-01-02 00:00:00"
 DEFAULT_END_TIME = "2025-12-31 23:45:00"
