@@ -25,8 +25,8 @@ import numpy as np
 import xarray as xr
 
 
-DEFAULT_INPUT_PATH = Path("output/raw_nwp_standardized.nc")
-DEFAULT_OUTPUT_DIR = Path("output/nwp_normalized")
+DEFAULT_INPUT_PATH = Path("output/raw_datasets/raw_nwp_dataset.nc")
+DEFAULT_OUTPUT_DIR = Path("output/clean_datasets/clean_nwp_dataset.nc")
 
 SPLITS = {
     "train": ("2025-01-02", "2025-10-31T23:00:00"),
@@ -193,7 +193,6 @@ def normalize_split(
         coords={
             "time": split_ds["time"],
             "issue_date": split_ds["issue_date"],
-            "lead_time": split_ds["lead_time"],
             "channel": normalized_cube["channel"],
             "lat": split_ds["lat"],
             "lon": split_ds["lon"],
