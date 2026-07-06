@@ -12,8 +12,6 @@
   ],
   "normalized_channels": [
     "ghi",
-    "sp",
-    "t2m",
     "tp",
     "u100",
     "v100"
