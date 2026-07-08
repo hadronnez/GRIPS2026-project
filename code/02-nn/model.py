@@ -7,7 +7,6 @@ SPATIAL_TYPES = ["solar", "wind", "hydro"]
 NONSPATIAL_TYPES = ["non_marketized", "tie_line"]
 ALL_ENERGY_TYPES = SPATIAL_TYPES + NONSPATIAL_TYPES
 
-
 # ---------------------------------------------------------------------------
 # Stage 1 - spatial model 
 # ---------------------------------------------------------------------------

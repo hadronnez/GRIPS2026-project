@@ -9,18 +9,20 @@ import pandas as pd
 import xarray as xr
 from torch.utils.data import Dataset
 
+ROOT = Path("C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project")
 
 METEO_PATH = {
-    "meteodata": Path("..output/clean_datasets/nwp_normalized.nc")
+    "meteodata":        ROOT / "output/raw_datasets/raw_nwp_dataset.nc"
+
 }
 TARGET_PATHS = {
-    "solar": Path("../output/clean_datasets/Photovoltaic.csv"),
-    "wind": Path("../output/clean_datasets/Wind_Power.csv"),
-    "hydro": Path("../output/clean_datasets/Hydro_Power.csv"),
-    "non_marketized": Path("../output/clean_datasets/Non_Marketized_Unit.csv"),
-    "tie_line": Path("../output/clean_datasets/Tie_Line.csv"),
-    "system_load": Path("../output/clean_datasets/System_Load.csv"),
-    "price": Path("../output/clean_datasets/Price.csv")
+    "solar":            ROOT / "output/raw_datasets/Photovoltaic.csv",
+    "wind":             ROOT / "output/raw_datasets/Wind_Power.csv",
+    "hydro":            ROOT / "output/raw_datasets/Hydro_Power.csv",
+    "non_marketized":   ROOT / "output/raw_datasets/Non_Marketized_Unit.csv",
+    "tie_line":         ROOT / "output/raw_datasets/Tie_Line.csv",
+    "system_load":      ROOT / "output/raw_datasets/System_Load.csv",
+    "price":            ROOT / "output/raw_datasets/Price.csv"
 }
 
 TRAIN_RANGE = ("2025-01-02", "2025-10-31")
