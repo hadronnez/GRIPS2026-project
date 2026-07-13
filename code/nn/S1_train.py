@@ -1,7 +1,6 @@
 
 import torch
 from torch.utils.data import DataLoader
-from model import EnergyPriceModel, compute_loss, SPATIAL_TYPES, NONSPATIAL_TYPES, ALL_ENERGY_TYPES
 from pathlib import Path
 import dataclasses
 import numpy as np
