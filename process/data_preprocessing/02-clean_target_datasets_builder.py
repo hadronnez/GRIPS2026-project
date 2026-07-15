@@ -21,14 +21,16 @@ from pathlib import Path
 import pandas as pd
 
 
-DEFAULT_INPUT_PATH = Path("raw_data/targets/production.csv")
-DEFAULT_OUTPUT_DIR = Path("output/raw_datasets")
+DEFAULT_INPUT_PATH = Path("input/targets/production.csv")
+DEFAULT_OUTPUT_DIR = Path("output/data_preprocessing/clean_datasets/")
 DEFAULT_TIME_COLUMN = "times"
 DEFAULT_START_TIME = "2025-01-02 00:00:00"
 DEFAULT_END_TIME = "2025-12-31 23:45:00"
 EXPECTED_MINUTES = (0, 15, 30, 45)
 ACTUAL_SUFFIX = "_Actual_Value"
 FORECAST_SUFFIX = "_Forecast_Value"
+ACTUAL_COLUMN_PREFIX = "actual"
+FORECAST_COLUMN_PREFIX = "forecast"
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -231,8 +233,8 @@ def reshape_variable_to_hourly(
             f"{variable.name} did not reshape into the expected 0/15/30/45-minute columns."
         )
 
-    actual.columns = [f"{variable.actual_column}_{minute}min" for minute in EXPECTED_MINUTES]
-    forecast.columns = [f"{variable.forecast_column}_{minute}min" for minute in EXPECTED_MINUTES]
+    actual.columns = [f"{ACTUAL_COLUMN_PREFIX}_{minute:02d}" for minute in EXPECTED_MINUTES]
+    forecast.columns = [f"{FORECAST_COLUMN_PREFIX}_{minute:02d}" for minute in EXPECTED_MINUTES]
 
     hourly = pd.concat([actual, forecast], axis=1).reset_index()
     hourly["time"] = hourly["time"].astype("datetime64[ns]")

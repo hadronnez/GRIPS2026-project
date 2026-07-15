@@ -1,4 +1,4 @@
-"""Build the standardized raw NWP xarray dataset.
+"""Build the standardized clean NWP xarray dataset.
 
 Each source NetCDF file is a daily forecast. The date in the filename is the
 issue date, and lead_time 0..23 maps to the next day's 00:00..23:00 target
@@ -33,8 +33,8 @@ except ImportError:
     dask = None
 
 
-DEFAULT_INPUT_DIR = Path("raw_data/meteodata")
-DEFAULT_OUTPUT_PATH = Path("output/raw_datasets/raw_nwp_dataset.nc")
+DEFAULT_INPUT_DIR = Path("input/meteodata")
+DEFAULT_OUTPUT_PATH = Path("output/data_preprocessing/clean_datasets/clean_nwp_dataset.nc")
 DEFAULT_START_ISSUE_DATE = "2025-01-01"
 DEFAULT_END_ISSUE_DATE = "2025-12-30"
 EXPECTED_LEAD_HOURS = 24

@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+
 import xarray as xr
 import pandas as pd
-import numpy as np
-import random
-from pathlib import Path
-import matplotlib.pyplot as plt
 
+import numpy as np
+from pathlib import Path
+
+from model.model import ResidualNet
 
 # ============================================================
 # PATHS
@@ -17,8 +18,11 @@ ROOT = Path(
     "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project"
 )
 
-METEO_PATH = ROOT / "output/clean_datasets/clean_meteodata_dataset.nc"
-SOLAR_PATH = ROOT / "output/raw_datasets/Photovoltaic.csv"
+METEO_PATH = ROOT / "output/data_preprocessing/clean_datasets/clean_nwp_dataset.nc"
+SOLAR_PATH = ROOT / "output/data_preprocessing/clean_datasets/Wind_Power.csv"
+
+PARAMS_DIR = ROOT / "process/stage1/parameters"
+MODEL_PATH = PARAMS_DIR / "wind_model.pt"
 
 
 # ============================================================
@@ -203,8 +207,6 @@ class ResidualDataset(Dataset):
         forecast_slice = self.forecast.loc[mask]
         actual_slice = self.actual.loc[mask]
 
-        times = residual_slice.index
-
         residual_norm = torch.tensor(residual_slice.values, dtype=torch.float32)
         forecast_raw = torch.tensor(forecast_slice.values, dtype=torch.float32)
         actual_raw = torch.tensor(actual_slice.values, dtype=torch.float32)
@@ -226,86 +228,6 @@ val_dataset = ResidualDataset(cube, val_windows, residual_series_norm, forecast_
 # paying per-call Python/tensor overhead more times.
 train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, drop_last=True)
 val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
-
-
-# ============================================================
-# MODEL
-#
-# Same computation as before, reordered for speed. This is
-# NOT an approximation -- it produces mathematically identical
-# output, just much cheaper to compute.
-#
-# WHY THE REORDER IS EXACT:
-# temporal_up1/temporal_up2 are per-pixel affine maps (kernel
-# size 1 in H,W -- no cross-pixel mixing) with weights shared
-# across every spatial location. For any affine f applied
-# identically to every pixel, mean_pixels(f(x)) == f(mean_pixels(x)).
-# So pooling H,W away right after the encoder, THEN doing the
-# temporal upsampling on the pooled (B,32,12) sequence, gives
-# the exact same numbers as upsampling first at full spatial
-# resolution and pooling afterward.
-#
-# The old order built and back-propped through a (B,32,48,104,225)
-# tensor -- ~36M values per sample -- just to average it away
-# at the end. That tensor, and the two ConvTranspose3d layers
-# that produced it at full spatial resolution, were the
-# overwhelming majority of the compute and memory cost. None
-# of it changed the final answer.
-#
-# Only the encoder genuinely needs full spatial resolution --
-# its 3x3 spatial kernel is the only place pixels actually mix
-# with their neighbors, which is real information (e.g. local
-# cloud patterns) that pooling first would destroy.
-# ============================================================
-
-
-class ResidualNet(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-
-        self.weather_encoder = nn.Sequential(
-            nn.Conv3d(7, 16, kernel_size=3, padding=1, padding_mode="replicate"),
-            nn.GroupNorm(num_groups=4, num_channels=16),
-            nn.GELU(),
-            nn.Conv3d(16, 32, kernel_size=3, padding=1, padding_mode="replicate"),
-            nn.GroupNorm(num_groups=8, num_channels=32),
-            nn.GELU(),
-        )
-
-        # learn 12h -> 24h, and 24h -> 48 quarter-hours.
-        # Now 1D: operates on the pooled (B,32,T) sequence, not
-        # on (B,32,T,H,W). Same weights-per-timestep idea as
-        # before, at a tiny fraction of the compute.
-        self.temporal_up1 = nn.ConvTranspose1d(32, 32, kernel_size=2, stride=2)
-        self.temporal_up2 = nn.ConvTranspose1d(32, 32, kernel_size=2, stride=2)
-
-        # scalar-per-timestep head, operating on (B, 32, 48)
-        self.head = nn.Sequential(
-            nn.Conv1d(32, 16, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups=4, num_channels=16),
-            nn.GELU(),
-            nn.Conv1d(16, 1, kernel_size=1),
-        )
-
-    def forward(self, weather):
-        # incoming: B,T,C,H,W (T=12) -> Conv3D expects B,C,T,H,W
-        weather = weather.permute(0, 2, 1, 3, 4)
-
-        x = self.weather_encoder(weather)
-        # B,32,12,H,W -- last point where spatial resolution matters
-
-        x = x.mean(dim=(3, 4))
-        # B,32,12 -- pool NOW, while the tensor is still small
-
-        x = self.temporal_up1(x)
-        x = self.temporal_up2(x)
-        # B,32,48 -- upsampling on a tiny sequence, not a spatial grid
-
-        residual_pred = self.head(x).squeeze(1)
-        # B,48
-
-        return residual_pred
 
 
 # ============================================================
@@ -397,82 +319,23 @@ for epoch in range(N_EPOCHS):
 
 
 # ============================================================
+# SAVE MODEL PARAMETERS
+#
+# Bundle the trained weights together with the residual
+# normalization stats (mean/std) fit on this run's data. The
+# evaluation script needs both to turn the model's normalized
+# residual output back into real power units.
+# ============================================================
 
-model.eval()
+PARAMS_DIR.mkdir(parents=True, exist_ok=True)
 
-all_times = []
-all_actual = []
-all_forecast = []
-all_improved = []
-
-with torch.no_grad():
-
-    for idx in range(len(val_dataset)):
-
-        weather, _, forecast_raw, actual_raw = val_dataset[idx]
-
-        start = val_windows[idx]
-
-        times = pd.date_range(
-            start=start,
-            periods=48,
-            freq="15min"
-        )
-
-        pred_norm = model(
-            weather.unsqueeze(0).to(device)
-        ).squeeze(0).cpu()
-
-        pred_real = pred_norm * RESIDUAL_STD + RESIDUAL_MEAN
-
-        improved = forecast_raw + pred_real
-
-        all_times.extend(times)
-        all_actual.extend(actual_raw.numpy())
-        all_forecast.extend(forecast_raw.numpy())
-        all_improved.extend(improved.numpy())
-
-results = pd.DataFrame({
-    "time": all_times,
-    "actual": all_actual,
-    "forecast": all_forecast,
-    "improved_forecast": all_improved, #This is the improved forecast
-})
-
-results.to_csv(
-    "validation_forecast.csv",
-    index=False
-)
-plt.figure(figsize=(18,6))
-
-plt.plot(
-    results["time"],
-    results["actual"],
-    label="Actual",
-    linewidth=2,
+torch.save(
+    {
+        "model_state_dict": model.state_dict(),
+        "residual_mean": RESIDUAL_MEAN,
+        "residual_std": RESIDUAL_STD,
+    },
+    MODEL_PATH,
 )
 
-plt.plot(
-    results["time"],
-    results["forecast"],
-    label="Forecast",
-    alpha=0.7,
-)
-
-plt.plot(
-    results["time"],
-    results["improved_forecast"],
-    label="Improved forecast",
-    alpha=0.9,
-)
-
-plt.legend()
-plt.grid(True)
-
-plt.xlabel("Time")
-plt.ylabel("Power")
-
-plt.tight_layout()
-
-plt.savefig("validation_timeseries.png", dpi=300)
-plt.show()
+print(f"Saved trained model parameters to: {MODEL_PATH}")
