@@ -178,7 +178,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "mod
 
 import torch.nn as nn
 from types import SimpleNamespace
-from models.iTransformer import Model
+from code.processing.nn.models.iTransformer import Model
 
 configs = SimpleNamespace(
     task_name="long_term_forecast",

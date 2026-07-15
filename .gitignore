@@ -8,6 +8,7 @@ build/
 dist/
 *.egg-info/
 .eggs/
+.matplotlib-cache/
 
 # --- Virtual environments ---
 venv/
