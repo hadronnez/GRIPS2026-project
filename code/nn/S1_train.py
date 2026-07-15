@@ -1,323 +1,478 @@
-
 import torch
-from torch.utils.data import DataLoader
-from pathlib import Path
-import dataclasses
-import numpy as np
-import pandas as pd
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 import xarray as xr
-from torch.utils.data import Dataset
+import pandas as pd
+import numpy as np
+import random
+from pathlib import Path
+import matplotlib.pyplot as plt
 
-ROOT = Path("C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project")
 
-METEO_PATH = {
-    "meteodata":        ROOT / "output/raw_datasets/raw_nwp_dataset.nc"
+# ============================================================
+# PATHS
+# ============================================================
 
-}
-TARGET_PATHS = {
-    "solar":            ROOT / "output/raw_datasets/Photovoltaic.csv",
-    "wind":             ROOT / "output/raw_datasets/Wind_Power.csv",
-    "hydro":            ROOT / "output/raw_datasets/Hydro_Power.csv",
-    "non_marketized":   ROOT / "output/raw_datasets/Non_Marketized_Unit.csv",
-    "tie_line":         ROOT / "output/raw_datasets/Tie_Line.csv",
-    "system_load":      ROOT / "output/raw_datasets/System_Load.csv",
-    "price":            ROOT / "output/raw_datasets/Price.csv"
-}
-
-TRAIN_RANGE = ("2025-01-02", "2025-10-31")
-VAL_RANGE = ("2025-11-01", "2025-12-30")
-
-SEQ_LEN = 24       
-STRIDE = 24         
-BATCH_SIZE = 16
-EPOCHS = 50
-LR = 1e-3
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-COL_CFG = dict(
-    timestamp="datetime",
-    actual=["actual_00", "actual_15", "actual_30", "actual_45"],
-    forecast=["forecast_00", "forecast_15", "forecast_30", "forecast_45"],
+ROOT = Path(
+    "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project"
 )
 
-EPS = 1e-6
+METEO_PATH = ROOT / "output/clean_datasets/clean_meteodata_dataset.nc"
+SOLAR_PATH = ROOT / "output/raw_datasets/Photovoltaic.csv"
 
 
-@dataclasses.dataclass
-class RawData:
-    times: pd.DatetimeIndex
-    meteo: dict[str, np.ndarray]          # name -> (T,C,H,W)
-    actual: dict[str, np.ndarray]         # name -> (T,4)  (ALL_ENERGY_TYPES)
-    forecast: dict[str, np.ndarray]       # name -> (T,4)  (ALL_ENERGY_TYPES)
-    price_actual: np.ndarray              # (T,4)
-    price_forecast: np.ndarray            # (T,4)
+# ============================================================
+# LOAD FORECAST + ACTUAL, BUILD RESIDUAL TARGET
+#
+# The task changed: instead of modeling production directly,
+# we now model the RESIDUAL = actual - forecast. The
+# day-ahead forecast is the baseline; the weather cube (which
+# presumably carries more accurate / higher-resolution
+# information than what went into the day-ahead forecast) is
+# used to predict the *correction* on top of that baseline.
+# ============================================================
+
+COL_CFG = {
+    "actual": ["actual_00", "actual_15", "actual_30", "actual_45"],
+    "forecast": ["forecast_00", "forecast_15", "forecast_30", "forecast_45"],
+}
 
 
-def _load_nc(path: str) -> tuple[pd.DatetimeIndex, np.ndarray]:
-    ds = xr.open_dataset(path)
-    var = list(ds.data_vars)[0]
-    da = ds[var].transpose("time", "channel", "lat", "lon")
-    times = pd.DatetimeIndex(da["time"].values)
-    return times, da.values.astype(np.float32)
+def wide_to_15min(df, cols):
+    values = df[cols].values.reshape(-1)
+    index = pd.date_range(start=df.index[0], periods=len(values), freq="15min")
+    return pd.Series(values, index=index)
 
 
-def _load_csv(path: str) -> tuple[pd.DatetimeIndex, np.ndarray, np.ndarray]:
-    df = pd.read_csv(path, parse_dates=[COL_CFG["timestamp"]])
-    df = df.sort_values(COL_CFG["timestamp"])
-    times = pd.DatetimeIndex(df[COL_CFG["timestamp"]])
-    actual = df[COL_CFG["actual"]].to_numpy(dtype=np.float32)
-    forecast = df[COL_CFG["forecast"]].to_numpy(dtype=np.float32)
-    return times, actual, forecast
+def load_solar(path):
+    df = pd.read_csv(path, parse_dates=["time"])
+    df = df.set_index("time").sort_index()
+    forecast = wide_to_15min(df, COL_CFG["forecast"])
+    actual = wide_to_15min(df, COL_CFG["actual"])
+    return forecast, actual
 
 
-def load_raw_arrays(meteo_paths: dict[str, str], csv_paths: dict[str, str]) -> RawData:
-    # un único cubo meteo (channel,lat,lon), compartido por solar/wind/hydro
-    t_meteo, arr_meteo = _load_nc(meteo_paths["meteodata"])
-    meteo_raw = {name: arr_meteo for name in SPATIAL_TYPES}
-    meteo_times = {name: t_meteo for name in SPATIAL_TYPES}
+forecast_series, actual_series = load_solar(SOLAR_PATH)
 
-    csv_raw, csv_times = {}, {}
-    for name in ALL_ENERGY_TYPES + ["price"]:
-        t, actual, forecast = _load_csv(csv_paths[name])
-        csv_raw[name] = (actual, forecast)
-        csv_times[name] = t
+residual_series = actual_series - forecast_series
 
-    common = None
-    for t in list(meteo_times.values()) + list(csv_times.values()):
-        common = t if common is None else common.intersection(t)
-    common = common.sort_values()
-    if len(common) == 0:
-        raise ValueError("No hay timestamps comunes entre meteo/csvs/precio.")
-
-    def reindex(times, arr):
-        idx = pd.Series(np.arange(len(times)), index=times)
-        pos = idx.loc[common].to_numpy()
-        return arr[pos]
-
-    meteo = {name: reindex(meteo_times[name], meteo_raw[name]) for name in SPATIAL_TYPES}
-    actual = {name: reindex(csv_times[name], csv_raw[name][0]) for name in ALL_ENERGY_TYPES}
-    forecast = {name: reindex(csv_times[name], csv_raw[name][1]) for name in ALL_ENERGY_TYPES}
-    price_actual = reindex(csv_times["price"], csv_raw["price"][0])
-    price_forecast = reindex(csv_times["price"], csv_raw["price"][1])
-
-    H = {meteo[name].shape[-2] for name in SPATIAL_TYPES}
-    W = {meteo[name].shape[-1] for name in SPATIAL_TYPES}
-    assert len(H) == 1 and len(W) == 1, "lat/lon deben coincidir entre solar/wind/hydro"
-
-    return RawData(common, meteo, actual, forecast, price_actual, price_forecast)
+print("Forecast:", forecast_series.shape)
+print("Actual:", actual_series.shape)
+print("Residual (actual - forecast):", residual_series.shape)
+print("Residual describe:\n", residual_series.describe())
 
 
-def split_raw(raw: RawData, start: str, end: str) -> RawData:
-    mask = (raw.times >= pd.Timestamp(start)) & (raw.times < pd.Timestamp(end))
-    idx = np.where(mask)[0]
-    return RawData(
-        times=raw.times[idx],
-        meteo={k: v[idx] for k, v in raw.meteo.items()},
-        actual={k: v[idx] for k, v in raw.actual.items()},
-        forecast={k: v[idx] for k, v in raw.forecast.items()},
-        price_actual=raw.price_actual[idx],
-        price_forecast=raw.price_forecast[idx],
+# ============================================================
+# RESIDUAL NORMALIZATION (z-score)
+#
+# Unlike raw production, the residual is signed and roughly
+# centered around 0, so a z-score (mean/std) is the natural
+# normalization here rather than dividing by a max.
+# ============================================================
+
+RESIDUAL_MEAN = residual_series.mean()
+RESIDUAL_STD = residual_series.std()
+
+print("Residual mean:", RESIDUAL_MEAN, "std:", RESIDUAL_STD)
+
+residual_series_norm = (residual_series - RESIDUAL_MEAN) / RESIDUAL_STD
+
+
+# ============================================================
+# METEO LAZY LOAD
+# ============================================================
+
+ds = xr.open_dataset(METEO_PATH)
+cube = ds["cube"]
+
+print(cube)
+
+
+# ============================================================
+# AVAILABLE DAYS
+#
+# Extended to a full year now that a year of data is
+# available. Adjust the end date if your actual coverage is
+# different -- this just needs to bracket whatever your .nc
+# file actually contains; days outside the file's range are
+# silently dropped by the valid_days check below anyway.
+# ============================================================
+
+days = pd.date_range("2025-01-01", "2025-12-30", freq="D")
+
+valid_days = []
+
+for d in days:
+    start = d
+    end = d + pd.Timedelta(hours=23)
+
+    if (
+        start.to_datetime64() in cube.time.values
+        and end.to_datetime64() in cube.time.values
+    ):
+        valid_days.append(d)
+
+print("Days:", len(valid_days))
+
+
+# ============================================================
+# TRAIN / VAL SPLIT (chronological, by day)
+#
+# Splitting by shuffled windows would leak information across
+# the train/val boundary (the two 12h windows of the same day
+# share a lot of weather correlation). Splitting by day, in
+# time order, gives an honest read on whether the model
+# generalizes to unseen days rather than just memorizing.
+# ============================================================
+
+
+TRAIN_START = pd.Timestamp("2025-01-02")
+TRAIN_END   = pd.Timestamp("2025-10-31")
+
+VAL_START = pd.Timestamp("2025-11-01")
+VAL_END   = pd.Timestamp("2025-12-30")
+
+train_days = [
+    d for d in valid_days
+    if TRAIN_START <= d <= TRAIN_END
+]
+
+val_days = [
+    d for d in valid_days
+    if VAL_START <= d <= VAL_END
+]
+
+print("Train days:", len(train_days), "Val days:", len(val_days))
+
+
+def make_windows(day_list):
+    starts = []
+    for d in day_list:
+        starts.append(d)
+        starts.append(d + pd.Timedelta(hours=12))
+    return starts
+
+
+train_windows = make_windows(train_days)
+val_windows = make_windows(val_days)
+
+print("Train windows:", len(train_windows), "Val windows:", len(val_windows))
+
+
+# ============================================================
+# DATASET
+#
+# Returns, per window:
+#   weather          (12,7,104,225) float32
+#   residual_norm    (48,) float32   -- training target
+#   forecast_raw     (48,) float32   -- baseline, real units
+#   actual_raw       (48,) float32   -- ground truth, real units
+#
+# forecast_raw / actual_raw aren't used in the loss -- they're
+# carried along so we can reconstruct "forecast + predicted
+# residual" and compare it against the real baseline at eval
+# time, in real units.
+# ============================================================
+
+
+class ResidualDataset(Dataset):
+
+    def __init__(self, cube, window_starts, residual_norm, forecast, actual):
+        self.cube = cube
+        self.window_starts = window_starts
+        self.residual_norm = residual_norm
+        self.forecast = forecast
+        self.actual = actual
+
+    def __len__(self):
+        return len(self.window_starts)
+
+    def __getitem__(self, idx):
+        start = self.window_starts[idx]
+        end = start + pd.Timedelta(hours=11)
+
+        weather = self.cube.sel(time=slice(start, end)).values
+        weather = torch.tensor(weather, dtype=torch.float32)
+
+        mask = (
+            (self.residual_norm.index >= start)
+            & (self.residual_norm.index < start + pd.Timedelta(hours=12))
+        )
+
+        residual_slice = self.residual_norm.loc[mask]
+        forecast_slice = self.forecast.loc[mask]
+        actual_slice = self.actual.loc[mask]
+
+        times = residual_slice.index
+
+        residual_norm = torch.tensor(residual_slice.values, dtype=torch.float32)
+        forecast_raw = torch.tensor(forecast_slice.values, dtype=torch.float32)
+        actual_raw = torch.tensor(actual_slice.values, dtype=torch.float32)
+
+        return (
+            weather,
+            residual_norm,
+            forecast_raw,
+            actual_raw
+        )
+
+
+train_dataset = ResidualDataset(cube, train_windows, residual_series_norm, forecast_series, actual_series)
+val_dataset = ResidualDataset(cube, val_windows, residual_series_norm, forecast_series, actual_series)
+
+# Batch size raised 4 -> 8: now that the model is much
+# cheaper per sample (see ResidualNet below), a bigger batch
+# uses your CPU's vectorized ops more efficiently instead of
+# paying per-call Python/tensor overhead more times.
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, drop_last=True)
+val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
+
+
+# ============================================================
+# MODEL
+#
+# Same computation as before, reordered for speed. This is
+# NOT an approximation -- it produces mathematically identical
+# output, just much cheaper to compute.
+#
+# WHY THE REORDER IS EXACT:
+# temporal_up1/temporal_up2 are per-pixel affine maps (kernel
+# size 1 in H,W -- no cross-pixel mixing) with weights shared
+# across every spatial location. For any affine f applied
+# identically to every pixel, mean_pixels(f(x)) == f(mean_pixels(x)).
+# So pooling H,W away right after the encoder, THEN doing the
+# temporal upsampling on the pooled (B,32,12) sequence, gives
+# the exact same numbers as upsampling first at full spatial
+# resolution and pooling afterward.
+#
+# The old order built and back-propped through a (B,32,48,104,225)
+# tensor -- ~36M values per sample -- just to average it away
+# at the end. That tensor, and the two ConvTranspose3d layers
+# that produced it at full spatial resolution, were the
+# overwhelming majority of the compute and memory cost. None
+# of it changed the final answer.
+#
+# Only the encoder genuinely needs full spatial resolution --
+# its 3x3 spatial kernel is the only place pixels actually mix
+# with their neighbors, which is real information (e.g. local
+# cloud patterns) that pooling first would destroy.
+# ============================================================
+
+
+class ResidualNet(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+        self.weather_encoder = nn.Sequential(
+            nn.Conv3d(7, 16, kernel_size=3, padding=1, padding_mode="replicate"),
+            nn.GroupNorm(num_groups=4, num_channels=16),
+            nn.GELU(),
+            nn.Conv3d(16, 32, kernel_size=3, padding=1, padding_mode="replicate"),
+            nn.GroupNorm(num_groups=8, num_channels=32),
+            nn.GELU(),
+        )
+
+        # learn 12h -> 24h, and 24h -> 48 quarter-hours.
+        # Now 1D: operates on the pooled (B,32,T) sequence, not
+        # on (B,32,T,H,W). Same weights-per-timestep idea as
+        # before, at a tiny fraction of the compute.
+        self.temporal_up1 = nn.ConvTranspose1d(32, 32, kernel_size=2, stride=2)
+        self.temporal_up2 = nn.ConvTranspose1d(32, 32, kernel_size=2, stride=2)
+
+        # scalar-per-timestep head, operating on (B, 32, 48)
+        self.head = nn.Sequential(
+            nn.Conv1d(32, 16, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=4, num_channels=16),
+            nn.GELU(),
+            nn.Conv1d(16, 1, kernel_size=1),
+        )
+
+    def forward(self, weather):
+        # incoming: B,T,C,H,W (T=12) -> Conv3D expects B,C,T,H,W
+        weather = weather.permute(0, 2, 1, 3, 4)
+
+        x = self.weather_encoder(weather)
+        # B,32,12,H,W -- last point where spatial resolution matters
+
+        x = x.mean(dim=(3, 4))
+        # B,32,12 -- pool NOW, while the tensor is still small
+
+        x = self.temporal_up1(x)
+        x = self.temporal_up2(x)
+        # B,32,48 -- upsampling on a tiny sequence, not a spatial grid
+
+        residual_pred = self.head(x).squeeze(1)
+        # B,48
+
+        return residual_pred
+
+
+# ============================================================
+# LOSS
+#
+# Plain MSE on the normalized residual, plus a small temporal
+# smoothness term (physical residuals shouldn't jump wildly
+# between consecutive 15-min steps). No sparsity/L1 terms --
+# those belonged to the old spatial-map formulation.
+# ============================================================
+
+TV_WEIGHT = 1e-3
+
+
+def loss_function(pred, target):
+    mse = nn.functional.mse_loss(pred, target)
+    tv_t = torch.abs(pred[:, 1:] - pred[:, :-1]).mean()
+    return mse + TV_WEIGHT * tv_t
+
+
+# ============================================================
+# TRAIN
+# ============================================================
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+model = ResidualNet().to(device)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3, weight_decay=1e-5)
+
+print("Number of parameters:", sum(p.numel() for p in model.parameters()))
+
+N_EPOCHS = 5
+
+for epoch in range(N_EPOCHS):
+
+    model.train()
+    total = 0
+
+    for i, (weather, residual_norm, _, _) in enumerate(train_loader):
+
+        weather = weather.to(device)
+        residual_norm = residual_norm.to(device)
+
+        pred = model(weather)
+        loss = loss_function(pred, residual_norm)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total += loss.item()
+
+    train_loss = total / len(train_loader)
+
+    # --------------------------------------------------------
+    # Validation: compare model MAE (forecast + predicted
+    # residual vs actual) against the baseline MAE (forecast
+    # alone vs actual). If the model isn't beating the
+    # baseline on held-out days, it isn't adding value.
+    # --------------------------------------------------------
+
+    model.eval()
+
+    baseline_abs_err = []
+    model_abs_err = []
+
+    with torch.no_grad():
+        for weather, residual_norm, forecast_raw, actual_raw in val_loader:
+
+            weather = weather.to(device)
+
+            pred_norm = model(weather).cpu()
+            pred_real = pred_norm * RESIDUAL_STD + RESIDUAL_MEAN
+
+            corrected_forecast = forecast_raw + pred_real
+
+            baseline_abs_err.append((actual_raw - forecast_raw).abs())
+            model_abs_err.append((actual_raw - corrected_forecast).abs())
+
+    baseline_mae = torch.cat(baseline_abs_err).mean().item() if baseline_abs_err else float("nan")
+    model_mae = torch.cat(model_abs_err).mean().item() if model_abs_err else float("nan")
+
+    print(
+        f"epoch {epoch:3d}  train_loss {train_loss:.4f}  "
+        f"baseline_MAE {baseline_mae:.3f}  model_MAE {model_mae:.3f}  "
+        f"improvement {baseline_mae - model_mae:+.3f}"
     )
 
 
-@dataclasses.dataclass
-class Stats:
-    meteo: dict[str, tuple[np.ndarray, np.ndarray]]      # name -> (mean(C,1,1), std(C,1,1))
-    actual: dict[str, tuple[np.ndarray, np.ndarray]]     # name -> (mean(4,), std(4,))
-    forecast: dict[str, tuple[np.ndarray, np.ndarray]]
-    price_actual: tuple[np.ndarray, np.ndarray]
-    price_forecast: tuple[np.ndarray, np.ndarray]
+# ============================================================
 
+model.eval()
 
-def compute_stats(raw_train: RawData) -> Stats:
-    def mstd(arr, axis):
-        m = arr.mean(axis=axis, keepdims=False)
-        s = arr.std(axis=axis, keepdims=False) + EPS
-        return m.astype(np.float32), s.astype(np.float32)
+all_times = []
+all_actual = []
+all_forecast = []
+all_improved = []
 
-    meteo = {}
-    for name, arr in raw_train.meteo.items():
-        m, s = mstd(arr, axis=(0, 2, 3))          # per canal
-        meteo[name] = (m.reshape(-1, 1, 1), s.reshape(-1, 1, 1))
+with torch.no_grad():
 
-    actual = {name: mstd(arr, axis=0) for name, arr in raw_train.actual.items()}
-    forecast = {name: mstd(arr, axis=0) for name, arr in raw_train.forecast.items()}
-    price_actual = mstd(raw_train.price_actual, axis=0)
-    price_forecast = mstd(raw_train.price_forecast, axis=0)
+    for idx in range(len(val_dataset)):
 
-    return Stats(meteo, actual, forecast, price_actual, price_forecast)
+        weather, _, forecast_raw, actual_raw = val_dataset[idx]
 
+        start = val_windows[idx]
 
-def _calendar_features(times: pd.DatetimeIndex) -> np.ndarray:
-    hour = times.hour.to_numpy(dtype=np.float32)
-    doy = times.dayofyear.to_numpy(dtype=np.float32)
-    return np.stack([
-        np.sin(2 * np.pi * hour / 24), np.cos(2 * np.pi * hour / 24),
-        np.sin(2 * np.pi * doy / 365.25), np.cos(2 * np.pi * doy / 365.25),
-    ], axis=-1).astype(np.float32)          # (T,4)
+        times = pd.date_range(
+            start=start,
+            periods=48,
+            freq="15min"
+        )
 
+        pred_norm = model(
+            weather.unsqueeze(0).to(device)
+        ).squeeze(0).cpu()
 
-class EnergyDataset(Dataset):
-    """Cada item es una secuencia de longitud seq_len lista para
-    EnergyPriceModel.forward(meteo, nonspatial_features, boundary_conditions).
-    """
+        pred_real = pred_norm * RESIDUAL_STD + RESIDUAL_MEAN
 
-    def __init__(self, raw: RawData, stats: Stats, seq_len: int = 24, stride: int = 1):
-        self.seq_len = seq_len
-        self.stride = stride
-        self.n_boundary_features = len(ALL_ENERGY_TYPES) + 1  # forecast prod (x5) + forecast precio
+        improved = forecast_raw + pred_real
 
-        self.meteo = {
-            name: torch.from_numpy((raw.meteo[name] - stats.meteo[name][0]) / stats.meteo[name][1])
-            for name in SPATIAL_TYPES
-        }
+        all_times.extend(times)
+        all_actual.extend(actual_raw.numpy())
+        all_forecast.extend(forecast_raw.numpy())
+        all_improved.extend(improved.numpy())
 
-        self.actual_norm = {
-            name: torch.from_numpy((raw.actual[name] - stats.actual[name][0]) / stats.actual[name][1])
-            for name in ALL_ENERGY_TYPES
-        }
+results = pd.DataFrame({
+    "time": all_times,
+    "actual": all_actual,
+    "forecast": all_forecast,
+    "improved_forecast": all_improved, #This is the improved forecast
+})
 
-        forecast_norm = {
-            name: (raw.forecast[name] - stats.forecast[name][0]) / stats.forecast[name][1]
-            for name in ALL_ENERGY_TYPES
-        }
-        price_forecast_norm = (raw.price_forecast - stats.price_forecast[0]) / stats.price_forecast[1]
-        price_actual_norm = (raw.price_actual - stats.price_actual[0]) / stats.price_actual[1]
-        self.price_actual_norm = torch.from_numpy(price_actual_norm)
+results.to_csv(
+    "validation_forecast.csv",
+    index=False
+)
+plt.figure(figsize=(18,6))
 
-        cal = _calendar_features(raw.times) 
-        self.nonspatial_features = {
-            name: torch.from_numpy(np.concatenate([forecast_norm[name], cal], axis=-1))
-            for name in NONSPATIAL_TYPES
-        }
+plt.plot(
+    results["time"],
+    results["actual"],
+    label="Actual",
+    linewidth=2,
+)
 
-        T = len(raw.times)
-        parts = [forecast_norm[name][:, :, None] for name in ALL_ENERGY_TYPES]  
-        parts.append(price_forecast_norm[:, :, None])
-        self.boundary_conditions = torch.from_numpy(np.concatenate(parts, axis=-1))  
+plt.plot(
+    results["time"],
+    results["forecast"],
+    label="Forecast",
+    alpha=0.7,
+)
 
-        self.T = T
+plt.plot(
+    results["time"],
+    results["improved_forecast"],
+    label="Improved forecast",
+    alpha=0.9,
+)
 
-    def __len__(self):
-        return max(0, (self.T - self.seq_len) // self.stride + 1)
+plt.legend()
+plt.grid(True)
 
-    def __getitem__(self, idx):
-        i0 = idx * self.stride
-        sl = slice(i0, i0 + self.seq_len)
+plt.xlabel("Time")
+plt.ylabel("Power")
 
-        meteo = {name: self.meteo[name][sl] for name in SPATIAL_TYPES}
-        nonspatial = {name: self.nonspatial_features[name][sl] for name in NONSPATIAL_TYPES}
-        boundary = self.boundary_conditions[sl]
-        productions_target = {name: self.actual_norm[name][sl] for name in ALL_ENERGY_TYPES}
-        price_target = self.price_actual_norm[sl].reshape(-1)  
-        return {
-            "meteo": meteo,
-            "nonspatial_features": nonspatial,
-            "boundary_conditions": boundary,
-            "productions_target": productions_target,
-            "price_target": price_target,
-        }
+plt.tight_layout()
 
-
-def collate(batch: list[dict]) -> dict:
-    def stack_dict(key):
-        keys = batch[0][key].keys()
-        return {k: torch.stack([b[key][k] for b in batch]) for k in keys}
-
-    return {
-        "meteo": stack_dict("meteo"),
-        "nonspatial_features": stack_dict("nonspatial_features"),
-        "boundary_conditions": torch.stack([b["boundary_conditions"] for b in batch]),
-        "productions_target": stack_dict("productions_target"),
-        "price_target": torch.stack([b["price_target"] for b in batch]),
-    }
-
-
-def build_dataloaders():
-    raw = load_raw_arrays(METEO_PATH, TARGET_PATHS)
-
-    raw_train = split_raw(raw, *TRAIN_RANGE)
-    raw_val = split_raw(raw, *VAL_RANGE)
-
-    stats = compute_stats(raw_train)  # fit SOLO en train
-
-    ds_train = EnergyDataset(raw_train, stats, seq_len=SEQ_LEN, stride=STRIDE)
-    ds_val = EnergyDataset(raw_val, stats, seq_len=SEQ_LEN, stride=SEQ_LEN)
-
-    dl_train = DataLoader(ds_train, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate)
-    dl_val = DataLoader(ds_val, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate)
-
-    # canales de meteo por tipo espacial (para instanciar el modelo)
-    spatial_in_channels = {name: raw.meteo[name].shape[1] for name in SPATIAL_TYPES}
-    H, W = raw.meteo["solar"].shape[-2], raw.meteo["solar"].shape[-1]
-    nonspatial_in_features = {name: ds_train.nonspatial_features[name].shape[-1] for name in NONSPATIAL_TYPES}
-    n_boundary_features = ds_train.n_boundary_features
-
-    return (dl_train, dl_val,   
-            spatial_in_channels, H, W, nonspatial_in_features, n_boundary_features)
-
-
-def to_device(batch, device):
-    def move_dict(d):
-        return {k: v.to(device) for k, v in d.items()}
-    return {
-        "meteo": move_dict(batch["meteo"]),
-        "nonspatial_features": move_dict(batch["nonspatial_features"]),
-        "boundary_conditions": batch["boundary_conditions"].to(device),
-        "productions_target": move_dict(batch["productions_target"]),
-        "price_target": batch["price_target"].to(device),
-    }
-
-
-def run_epoch(model, loader, optimizer=None):
-    train_mode = optimizer is not None
-    model.train(train_mode)
-    totals = {"total": 0.0, "stage1": 0.0, "stage2": 0.0, "tv": 0.0}
-    n = 0
-    for batch in loader:
-        batch = to_device(batch, DEVICE)
-        with torch.set_grad_enabled(train_mode):
-            outputs = model(batch["meteo"], batch["nonspatial_features"], batch["boundary_conditions"])
-            targets = {"productions": batch["productions_target"], "price": batch["price_target"]}
-            losses = compute_loss(outputs, targets)
-            if train_mode:
-                optimizer.zero_grad()
-                losses["total"].backward()
-                optimizer.step()
-        bs = batch["price_target"].shape[0]
-        for k in totals:
-            totals[k] += losses[k].item() * bs
-        n += bs
-    return {k: v / n for k, v in totals.items()}
-
-
-def main():
-    (dl_train, dl_val, spatial_in_channels, H, W,
-     nonspatial_in_features, n_boundary_features) = build_dataloaders()
-
-    model = EnergyPriceModel(
-        spatial_in_channels=spatial_in_channels,
-        H=H, W=W,
-        nonspatial_in_features=nonspatial_in_features,
-        n_boundary_features=n_boundary_features,
-    ).to(DEVICE)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-
-    best_val = float("inf")
-    for epoch in range(1, EPOCHS + 1):
-        train_losses = run_epoch(model, dl_train, optimizer)
-        val_losses = run_epoch(model, dl_val)
-        print(f"[{epoch:03d}] train {train_losses} | val {val_losses}")
-
-        if val_losses["total"] < best_val:
-            best_val = val_losses["total"]
-            torch.save(model.state_dict(), "/mnt/user-data/outputs/best_model.pt")
-
-    model.load_state_dict(torch.load("/mnt/user-data/outputs/best_model.pt"))
-    test_losses = run_epoch(model, dl_val)  
-    print(f"test {test_losses}")
-
-
-if __name__ == "__main__":
-    main()
+plt.savefig("validation_timeseries.png", dpi=300)
+plt.show()

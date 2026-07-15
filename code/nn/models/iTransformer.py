@@ -9,13 +9,13 @@ from layers.Embed import DataEmbedding_inverted
 
 class Model(nn.Module):
     """
-    iTransformer adaptado para:
-        N variables exógenas  --->  1 serie objetivo
+    Adapted iTransformer:
+        N time series  --->  1 time series
 
-    Entrada:
+    Input:
         x_enc : (B, seq_len, N)
 
-    Salida:
+    Output:
         (B, pred_len)
     """
 
@@ -27,7 +27,6 @@ class Model(nn.Module):
         self.output_attention = configs.output_attention
         self.use_norm = configs.use_norm
 
-        # Embedding
         self.enc_embedding = DataEmbedding_inverted(
             configs.seq_len,
             configs.d_model,
@@ -36,7 +35,6 @@ class Model(nn.Module):
             configs.dropout
         )
 
-        # Encoder
         self.encoder = Encoder(
             [
                 EncoderLayer(
@@ -61,32 +59,38 @@ class Model(nn.Module):
         )
 
         #################################################################
-        # NUEVO
+        # MLP head
         #################################################################
 
-        # Aprende cómo combinar las N variables
-        self.token_pool = nn.Linear(configs.enc_in, 1)
+        hidden = 4 * configs.d_model
 
-        # Convierte la representación latente en la serie de precios
-        self.projector = nn.Linear(configs.d_model, configs.pred_len)
+        self.head = nn.Sequential(
+            nn.Linear(configs.enc_in * configs.d_model, hidden),
+            nn.GELU(),
+            nn.Dropout(configs.dropout),
+
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Dropout(configs.dropout),
+
+            nn.Linear(hidden, configs.pred_len),
+)
 
     def forecast(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None):
 
-        # (B,L,N) -> (B,N,d_model)
+        # (B, L, N) -> (B, N, d_model)
         enc_out = self.enc_embedding(x_enc, x_mark_enc)
 
-        # Encoder
+        # Encoder iTransformer
         enc_out, attns = self.encoder(enc_out, attn_mask=None)
 
-        # Pooling sobre las variables
-        enc_out = enc_out.transpose(1, 2)
-        enc_out = self.token_pool(enc_out).squeeze(-1)
+        # (B, N, d_model) -> (B, N*d_model)
+        enc_out = enc_out.reshape(enc_out.size(0), -1)
 
-        # (B,d_model) -> (B,pred_len)
-        dec_out = self.projector(enc_out)
+        # MLP Head: (B, N*d_model) -> (B, pred_len)
+        dec_out = self.head(enc_out)
 
         return dec_out, attns
-
 
     def forward(
         self,
