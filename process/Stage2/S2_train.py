@@ -16,9 +16,9 @@ from process.stage2.model.iTransformer import Model
 CHECKPOINT_PATH = ROOT / "process" / "stage2" / "parameters" / "best_model_enhanced_forecast.pt"
 
 TARGET_PATHS = {
-    "solar":            ROOT / "output/stage1/solar_forecast.csv",                                  #enhanced forecast (stage1 output, long format)
-    "wind":             ROOT / "output/stage1/wind_forecast.csv",                                   #enhanced forecast (stage1 output, long format)
-    "hydro":            ROOT / "output/stage1/hydro_forecast.csv",                                  #enhanced forecast (stage1 output, long format)
+    "solar":            ROOT / "output/stage1/solar_improved_forecast.csv",                                  #enhanced forecast (stage1 output, long format)
+    "wind":             ROOT / "output/stage1/wind_improved_forecast.csv",                                   #enhanced forecast (stage1 output, long format)
+    "hydro":            ROOT / "output/stage1/hydro_improved_forecast.csv",                                  #enhanced forecast (stage1 output, long format)
     "non_marketized":   ROOT / "output/data_preprocessing/clean_datasets/Non_Marketized_Unit.csv",
     "tie_line":         ROOT / "output/data_preprocessing/clean_datasets/Tie_Line.csv",
     "system_load":      ROOT / "output/data_preprocessing/clean_datasets/System_Load.csv",

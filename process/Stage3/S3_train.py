@@ -5,7 +5,7 @@ import pandas as pd
 
 def optimal_buy_sell_windows(
     df,
-    price_col="price",
+    price_col="real_price",
     window=8,
     use_mean=True,
     signal=1000,
@@ -79,12 +79,21 @@ def optimal_buy_sell_windows(
 
     return best_buy, best_sell, actions, window_values
 
+#-----------------------------------------------------------------
 
+import sys, os
+from pathlib import Path
 
+ROOT = Path("C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project")
+sys.path.insert(0, str(ROOT))
+
+file_path = ROOT / "output" / "stage2" / "predicted_price.csv"
+
+df = pd.read_csv(file_path)
 
 buy, sell, actions, window_values = optimal_buy_sell_windows(
     df,
-    price_col="precio",
+    price_col="real_price",
     window=8
 )
 

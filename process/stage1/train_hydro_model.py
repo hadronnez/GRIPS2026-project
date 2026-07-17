@@ -4,7 +4,6 @@ from torch.utils.data import Dataset, DataLoader
 
 import xarray as xr
 import pandas as pd
-
 import numpy as np
 from pathlib import Path
 
@@ -19,21 +18,18 @@ ROOT = Path(
 )
 
 METEO_PATH = ROOT / "output/data_preprocessing/clean_datasets/clean_nwp_dataset.nc"
-SOLAR_PATH = ROOT / "output/data_preprocessing/clean_datasets/Hydro_Power.csv"
+DATA_PATH = ROOT / "output/data_preprocessing/clean_datasets/Hydro_Power.csv" 
 
 PARAMS_DIR = ROOT / "process/stage1/parameters"
-MODEL_PATH = PARAMS_DIR / "hydro_model.pt"
+OOF_CSV_PATH = ROOT / "output/data_preprocessing/clean_datasets/hydro_improved_forecast.csv"
 
 
 # ============================================================
 # LOAD FORECAST + ACTUAL, BUILD RESIDUAL TARGET
 #
-# The task changed: instead of modeling production directly,
-# we now model the RESIDUAL = actual - forecast. The
-# day-ahead forecast is the baseline; the weather cube (which
-# presumably carries more accurate / higher-resolution
-# information than what went into the day-ahead forecast) is
-# used to predict the *correction* on top of that baseline.
+# We model the RESIDUAL = actual - forecast. The day-ahead
+# forecast is the baseline; the weather cube is used to
+# predict the *correction* on top of that baseline.
 # ============================================================
 
 COL_CFG = {
@@ -56,30 +52,13 @@ def load_solar(path):
     return forecast, actual
 
 
-forecast_series, actual_series = load_solar(SOLAR_PATH)
-
+forecast_series, actual_series = load_solar(DATA_PATH)
 residual_series = actual_series - forecast_series
 
 print("Forecast:", forecast_series.shape)
 print("Actual:", actual_series.shape)
 print("Residual (actual - forecast):", residual_series.shape)
 print("Residual describe:\n", residual_series.describe())
-
-
-# ============================================================
-# RESIDUAL NORMALIZATION (z-score)
-#
-# Unlike raw production, the residual is signed and roughly
-# centered around 0, so a z-score (mean/std) is the natural
-# normalization here rather than dividing by a max.
-# ============================================================
-
-RESIDUAL_MEAN = residual_series.mean()
-RESIDUAL_STD = residual_series.std()
-
-print("Residual mean:", RESIDUAL_MEAN, "std:", RESIDUAL_STD)
-
-residual_series_norm = (residual_series - RESIDUAL_MEAN) / RESIDUAL_STD
 
 
 # ============================================================
@@ -93,23 +72,15 @@ print(cube)
 
 
 # ============================================================
-# AVAILABLE DAYS
-#
-# Extended to a full year now that a year of data is
-# available. Adjust the end date if your actual coverage is
-# different -- this just needs to bracket whatever your .nc
-# file actually contains; days outside the file's range are
-# silently dropped by the valid_days check below anyway.
+# AVAILABLE DAYS (days with full 24h coverage in the cube)
 # ============================================================
 
 days = pd.date_range("2025-01-01", "2025-12-30", freq="D")
 
 valid_days = []
-
 for d in days:
     start = d
     end = d + pd.Timedelta(hours=23)
-
     if (
         start.to_datetime64() in cube.time.values
         and end.to_datetime64() in cube.time.values
@@ -120,33 +91,24 @@ print("Days:", len(valid_days))
 
 
 # ============================================================
-# TRAIN / VAL SPLIT (chronological, by day)
+# CROSS-FITTING FOLDS
 #
-# Splitting by shuffled windows would leak information across
-# the train/val boundary (the two 12h windows of the same day
-# share a lot of weather correlation). Splitting by day, in
-# time order, gives an honest read on whether the model
-# generalizes to unseen days rather than just memorizing.
+# 4 quarters, each held out once as validation. The train set
+# for a fold is every valid day OUTSIDE that quarter (the
+# other ~9 months) -- for Q2/Q3 that's two chronological
+# chunks (e.g. holding out Apr-Jun trains on Jan-Mar +
+# Jul-Dec). Rotating like this means every day of the year
+# eventually gets an out-of-fold correction, produced by a
+# model that never saw that day's target during its own
+# training.
 # ============================================================
 
-
-TRAIN_START = pd.Timestamp("2025-01-02")
-TRAIN_END   = pd.Timestamp("2025-10-31")
-
-VAL_START = pd.Timestamp("2025-11-01")
-VAL_END   = pd.Timestamp("2025-12-30")
-
-train_days = [
-    d for d in valid_days
-    if TRAIN_START <= d <= TRAIN_END
+FOLDS = [
+    {"name": "Q1", "val_start": pd.Timestamp("2025-01-02"), "val_end": pd.Timestamp("2025-03-31")},
+    {"name": "Q2", "val_start": pd.Timestamp("2025-04-01"), "val_end": pd.Timestamp("2025-06-30")},
+    {"name": "Q3", "val_start": pd.Timestamp("2025-07-01"), "val_end": pd.Timestamp("2025-09-30")},
+    {"name": "Q4", "val_start": pd.Timestamp("2025-10-01"), "val_end": pd.Timestamp("2025-12-30")},
 ]
-
-val_days = [
-    d for d in valid_days
-    if VAL_START <= d <= VAL_END
-]
-
-print("Train days:", len(train_days), "Val days:", len(val_days))
 
 
 def make_windows(day_list):
@@ -157,12 +119,6 @@ def make_windows(day_list):
     return starts
 
 
-train_windows = make_windows(train_days)
-val_windows = make_windows(val_days)
-
-print("Train windows:", len(train_windows), "Val windows:", len(val_windows))
-
-
 # ============================================================
 # DATASET
 #
@@ -171,11 +127,6 @@ print("Train windows:", len(train_windows), "Val windows:", len(val_windows))
 #   residual_norm    (48,) float32   -- training target
 #   forecast_raw     (48,) float32   -- baseline, real units
 #   actual_raw       (48,) float32   -- ground truth, real units
-#
-# forecast_raw / actual_raw aren't used in the loss -- they're
-# carried along so we can reconstruct "forecast + predicted
-# residual" and compare it against the real baseline at eval
-# time, in real units.
 # ============================================================
 
 
@@ -211,32 +162,11 @@ class ResidualDataset(Dataset):
         forecast_raw = torch.tensor(forecast_slice.values, dtype=torch.float32)
         actual_raw = torch.tensor(actual_slice.values, dtype=torch.float32)
 
-        return (
-            weather,
-            residual_norm,
-            forecast_raw,
-            actual_raw
-        )
-
-
-train_dataset = ResidualDataset(cube, train_windows, residual_series_norm, forecast_series, actual_series)
-val_dataset = ResidualDataset(cube, val_windows, residual_series_norm, forecast_series, actual_series)
-
-# Batch size raised 4 -> 8: now that the model is much
-# cheaper per sample (see ResidualNet below), a bigger batch
-# uses your CPU's vectorized ops more efficiently instead of
-# paying per-call Python/tensor overhead more times.
-train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, drop_last=True)
-val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
+        return weather, residual_norm, forecast_raw, actual_raw
 
 
 # ============================================================
 # LOSS
-#
-# Plain MSE on the normalized residual, plus a small temporal
-# smoothness term (physical residuals shouldn't jump wildly
-# between consecutive 15-min steps). No sparsity/L1 terms --
-# those belonged to the old spatial-map formulation.
 # ============================================================
 
 TV_WEIGHT = 1e-3
@@ -249,93 +179,137 @@ def loss_function(pred, target):
 
 
 # ============================================================
-# TRAIN
+# R^2 HELPER
+# ============================================================
+
+def r2_score(actual, pred):
+    actual = actual.numpy() if torch.is_tensor(actual) else np.asarray(actual)
+    pred = pred.numpy() if torch.is_tensor(pred) else np.asarray(pred)
+    ss_res = np.sum((actual - pred) ** 2)
+    ss_tot = np.sum((actual - actual.mean()) ** 2)
+    return 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+
+# ============================================================
+# TRAIN + OUT-OF-FOLD INFERENCE, ONE FOLD AT A TIME
 # ============================================================
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
-model = ResidualNet().to(device)
-
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3, weight_decay=1e-5)
-
-print("Number of parameters:", sum(p.numel() for p in model.parameters()))
-
-N_EPOCHS = 5
-
-for epoch in range(N_EPOCHS):
-
-    model.train()
-    total = 0
-
-    for i, (weather, residual_norm, _, _) in enumerate(train_loader):
-
-        weather = weather.to(device)
-        residual_norm = residual_norm.to(device)
-
-        pred = model(weather)
-        loss = loss_function(pred, residual_norm)
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        total += loss.item()
-
-    train_loss = total / len(train_loader)
-
-    # --------------------------------------------------------
-    # Validation: compare model MAE (forecast + predicted
-    # residual vs actual) against the baseline MAE (forecast
-    # alone vs actual). If the model isn't beating the
-    # baseline on held-out days, it isn't adding value.
-    # --------------------------------------------------------
-
-    model.eval()
-
-    baseline_abs_err = []
-    model_abs_err = []
-
-    with torch.no_grad():
-        for weather, residual_norm, forecast_raw, actual_raw in val_loader:
-
-            weather = weather.to(device)
-
-            pred_norm = model(weather).cpu()
-            pred_real = pred_norm * RESIDUAL_STD + RESIDUAL_MEAN
-
-            corrected_forecast = forecast_raw + pred_real
-
-            baseline_abs_err.append((actual_raw - forecast_raw).abs())
-            model_abs_err.append((actual_raw - corrected_forecast).abs())
-
-    baseline_mae = torch.cat(baseline_abs_err).mean().item() if baseline_abs_err else float("nan")
-    model_mae = torch.cat(model_abs_err).mean().item() if model_abs_err else float("nan")
-
-    print(
-        f"epoch {epoch:3d}  train_loss {train_loss:.4f}  "
-        f"baseline_MAE {baseline_mae:.3f}  model_MAE {model_mae:.3f}  "
-        f"improvement {baseline_mae - model_mae:+.3f}"
-    )
-
-
-# ============================================================
-# SAVE MODEL PARAMETERS
-#
-# Bundle the trained weights together with the residual
-# normalization stats (mean/std) fit on this run's data. The
-# evaluation script needs both to turn the model's normalized
-# residual output back into real power units.
-# ============================================================
+N_EPOCHS = 3
 
 PARAMS_DIR.mkdir(parents=True, exist_ok=True)
 
-torch.save(
-    {
-        "model_state_dict": model.state_dict(),
-        "residual_mean": RESIDUAL_MEAN,
-        "residual_std": RESIDUAL_STD,
-    },
-    MODEL_PATH,
-)
+oof_frames = []
 
-print(f"Saved trained model parameters to: {MODEL_PATH}")
+for fold in FOLDS:
+
+    fold_name = fold["name"]
+    val_start, val_end = fold["val_start"], fold["val_end"]
+
+    val_days = [d for d in valid_days if val_start <= d <= val_end]
+    train_days = [d for d in valid_days if d not in val_days]
+
+    print(f"\n=== Fold {fold_name}  (val {val_start.date()} -> {val_end.date()}) ===")
+    print("Train days:", len(train_days), "Val days:", len(val_days))
+
+    train_windows = make_windows(train_days)
+    val_windows = make_windows(val_days)
+
+    # --------------------------------------------------------
+    # Residual normalization stats fit on THIS FOLD'S training
+    # days only -- never on validation days, otherwise the val
+    # fold leaks into its own correction stats.
+    # --------------------------------------------------------
+
+    train_mask = residual_series.index.normalize().isin(pd.DatetimeIndex(train_days))
+    RESIDUAL_MEAN = residual_series[train_mask].mean()
+    RESIDUAL_STD = residual_series[train_mask].std()
+    residual_series_norm = (residual_series - RESIDUAL_MEAN) / RESIDUAL_STD
+
+    train_dataset = ResidualDataset(cube, train_windows, residual_series_norm, forecast_series, actual_series)
+    val_dataset = ResidualDataset(cube, val_windows, residual_series_norm, forecast_series, actual_series)
+
+    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, drop_last=True)
+    val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
+
+    model = ResidualNet().to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3, weight_decay=1e-5)
+
+    print("Number of parameters:", sum(p.numel() for p in model.parameters()))
+
+    for epoch in range(N_EPOCHS):
+
+        model.train()
+        total = 0
+
+        for weather, residual_norm, _, _ in train_loader:
+            weather = weather.to(device)
+            residual_norm = residual_norm.to(device)
+
+            pred = model(weather)
+            loss = loss_function(pred, residual_norm)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total += loss.item()
+
+        train_loss = total / len(train_loader)
+
+        # ------------------------------------------------------------
+        # R^2 over the WHOLE validation fold at once (pooled across all
+        # windows, not averaged per-batch): baseline forecast vs
+        # actual, and reconstructed (forecast + predicted residual)
+        # vs actual.
+        # ------------------------------------------------------------
+
+        model.eval()
+
+        actual_chunks, forecast_chunks, corrected_chunks = [], [], []
+
+        with torch.no_grad():
+            for weather, residual_norm, forecast_raw, actual_raw in val_loader:
+                weather = weather.to(device)
+
+                pred_norm = model(weather).cpu()
+                pred_real = pred_norm * RESIDUAL_STD + RESIDUAL_MEAN
+                corrected_forecast = forecast_raw + pred_real
+
+                actual_chunks.append(actual_raw)
+                forecast_chunks.append(forecast_raw)
+                corrected_chunks.append(corrected_forecast)
+
+        if actual_chunks:
+            actual_all = torch.cat(actual_chunks)
+            forecast_all = torch.cat(forecast_chunks)
+            corrected_all = torch.cat(corrected_chunks)
+
+            r2_baseline = r2_score(actual_all, forecast_all)
+            r2_model = r2_score(actual_all, corrected_all)
+        else:
+            r2_baseline = float("nan")
+            r2_model = float("nan")
+
+        print(
+            f"epoch {epoch:3d}  train_loss {train_loss:.4f}  "
+            f"R2_baseline(forecast) {r2_baseline:.4f}  "
+            f"R2_model(corrected) {r2_model:.4f}"
+        )
+
+    # --------------------------------------------------------
+    # Save this fold's model + its own normalization stats
+    # --------------------------------------------------------
+
+    fold_model_path = PARAMS_DIR / f"hydro_model_fold_{fold_name}.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "residual_mean": RESIDUAL_MEAN,
+            "residual_std": RESIDUAL_STD,
+            "val_start": str(val_start.date()),
+            "val_end": str(val_end.date()),
+        },
+        fold_model_path,
+    )
+    print(f"Saved fold {fold_name} model to: {fold_model_path}")
