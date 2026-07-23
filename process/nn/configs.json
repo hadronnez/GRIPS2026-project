@@ -1,0 +1,89 @@
+{
+  "slots_per_day": 96,
+
+  "meteodata": "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/output/data_preprocessing/clean_datasets/clean_nwp_dataset.nc",
+
+  "renewables": {
+    "solar": "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/output/data_preprocessing/clean_datasets/Photovoltaic.csv",
+    "wind": "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/output/data_preprocessing/clean_datasets/Wind_Power.csv",
+    "hydro": "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/output/data_preprocessing/clean_datasets/Hydro_Power.csv"
+  },
+
+  "boundary_conditions": {
+    "non_marketized": "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/output/data_preprocessing/clean_datasets/Non_Marketized_Unit.csv",
+    "tie_line": "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/output/data_preprocessing/clean_datasets/Tie_Line.csv",
+    "system_load": "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/output/data_preprocessing/clean_datasets/System_Load.csv"
+  },
+  "price": "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/output/data_preprocessing/clean_datasets/Price.csv",
+
+  "columns": {
+    "timestamp": "time",
+    "actual": ["actual_00", "actual_15", "actual_30", "actual_45"],
+    "forecast": ["forecast_00", "forecast_15", "forecast_30", "forecast_45"]
+  },
+
+  "date_ranges": {
+    "train": ["2025-01-02", "2025-10-31"],
+    "val": ["2025-11-01", "2025-12-30"]
+  },
+
+  "stage1": {
+    "in_channels": 7,
+    "encoder_channels": [16, 32],
+    "encoder_norm_groups": [4, 8],
+    "encoder_kernel_size": 3,
+    "encoder_padding_mode": "replicate",
+    "num_temporal_upsamples": 2,
+    "upsample_kernel_size": 2,
+    "upsample_stride": 2,
+    "head_hidden_channels": 16,
+    "head_kernel_size": 3,
+    "head_norm_groups": 4,
+    "out_channels": 1
+  },
+
+  "stage2": {
+    "task_name": "long_term_forecast",
+    "seq_len": 96,
+    "pred_len": 96,
+    "output_attention": false,
+    "use_norm": false,
+    "d_model": 256,
+    "embed": "timeF",
+    "freq": "t",
+    "dropout": 0.10,
+    "class_strategy": "projection",
+    "factor": 1,
+    "n_heads": 16,
+    "d_ff": 256,
+    "activation": "gelu",
+    "e_layers": 2
+  },
+
+  "stage3": {
+    "slots_per_day": 96,
+    "rolling_window_length": 8,
+    "charge_power": -1000,
+    "discharge_power": 1000,
+    "charge_start_min": 0,
+    "charge_start_max": 80,
+    "discharge_start_min": 8,
+    "discharge_start_max": 88
+  },
+
+  "training": {
+    "epochs": 10,
+    "batch_size": 4, 
+    "lr": 5e-5,
+    "weight_decay": 1e-5,
+    "T0": 10.0,
+    "T_min": 1,
+    "lambda_start": 2,
+    "lambda_end": 2,
+    "warmup_fraction": 1,
+    "gamma_start": 0.1,
+    "gamma_end": 0.1,
+    "stage1_pretrained_weights": {"solar": "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/process/nn/pretrained_parameters/solar_pretrained.pt", "wind":"C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/process/nn/pretrained_parameters/wind_pretrained.pt", "hydro":"C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/process/nn/pretrained_parameters/hydro_pretrained.pt"},
+    "stage2_pretrained_weights": "C:/Users/adria/Desktop/asuntos_adrian/Temporal_heavy_projects/GRIPS2026-project/process/nn/pretrained_parameters/stage2.pt"
+  }
+}
